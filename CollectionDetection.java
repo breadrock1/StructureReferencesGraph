@@ -1,3 +1,4 @@
+import java.lang.ref.Reference;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -170,18 +171,44 @@ public class CollectionDetection extends GhidraScript {
 	}
 	
 	private void generateFullGraph(Map<Address, List<Address>> structureReferences, Map<Address, List<Reference>> memoryReferences) {
-		//Stream.concat(structureReferences.keySet().stream(), memoryReferences.keySet().stream())
-		//	.collect(Collectors.toMap(addr -> addr, addr -> vertex(addr)));
-		
-		Map<Address, AttributedVertex> strctVertex = new HashMap<>();
-		for (Address strctAddress : structureReferences.keySet()) {
-			List<Address> refs = structureReferences.get(strctAddress);
-			AttributedVertex node = vertex(refs .get(0), refs.get(1));
-			strctVertex.put(strctAddress, node);
+		Map<Address, Structure> allStructures = new HashMap<Address, Structure>();
+		for (Address address : structureReferences.keySet()) {
+			Structure structure = new Structure(address, structureReferences.get(address));
+			allStructures.put(address, structure);
 		}
-		
-		for (Address strctAddress : structureReferences.keySet()) {
-			
+
+		List<StructureReference> structureReferenceList = new ArrayList<>();
+		for (Address address : memoryReferences.keySet()) {
+			for (Reference reference : memoryReferences.get(address)) {
+				Address toAddress = currRef.getToAddress();
+				Address fromAddress = currRef.getFromAddress();
+
+				Structure toStructure = allStructures.get(toAddress);
+				if (toStructure == null) {
+					toStructure = new Structure(toAddress, List.of());
+				}
+
+				Structure fromStructure = allStructures.get(fromAddress);
+				if (fromStructure == null) {
+					fromStructure = new Structure(fromAddress, List.of());
+				}
+
+				StructureReference structureReference = new StructureReference(fromStructure, toStructure);
+				structureReferenceList.add(structureReference);
+			}
+		}
+
+		Map<Structure, AttributedVertex> strctVertex = new HashMap<>();
+		for (Structure structure : allStructures.values()) {
+			AttributedVertex node = vertex(structure.getStructureAddress());
+			strctVertex.put(structure, node);
+		}
+
+		for (StructureReference structureReference : structureReferenceList) {
+			Structure toStructure = structureReference.getToStructure();
+			Structure fromStructure = structureReference.getFromStructure();
+
+			edge(strctVertex.get(fromStructure), strctVertex.get(toStructure));
 		}
 	}
 
