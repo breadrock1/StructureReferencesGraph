@@ -1,4 +1,3 @@
-import java.lang.ref.Reference;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -39,6 +38,8 @@ public class CollectionDetection extends GhidraScript {
 	
 	private AttributedGraph graph;
 	private Map<Address, AttributedVertex> graphNodes;
+	
+	private final static Integer POINTER_ADDRESS_OFFSET = 16;
 
 
     @Override
@@ -56,10 +57,143 @@ public class CollectionDetection extends GhidraScript {
 		
 		this.graph = new AttributedGraph("Pointer References Graph", new EmptyGraphType());
 		//generatePointersGraph(dataReferences);
-		generateStructureGraph(structureReferences);
+		//generateStructureGraph(structureReferences);
+		//generateFullGraph(structureReferences, dataReferences);
+		//display.setGraph(this.graph, "Pointer References Graph", false, this.monitor);
+		
+		List<Address> memoryAddresses = loadMemoryAddresses();
+		Map<Address, List<Reference>> memoryReferences = loadMemoryAddressReferences(memoryAddresses);
+		List<List<Address>> neigboursPointers = loadNeighbourPointers(memoryReferences);
+		List<MemoryStructure> listMemoryStructures = generateMemoryStructures(neigboursPointers);
+
+		Map<Address, MemoryStructure> memoryStructures = listMemoryStructures.stream()
+				.collect(Collectors.toMap(MemoryStructure::getAddress, mem -> mem));
+
+		generateMemoryStructureGraph(memoryStructures, memoryReferences);
 		display.setGraph(this.graph, "Pointer References Graph", false, this.monitor);
     }
 
+    private List<Address> loadMemoryAddresses() {
+    	AddressIterator addressIterator = currentProgram.getMemory().getAddresses(true);
+    	return StreamSupport.stream(addressIterator.spliterator(), false)
+    			.sorted()
+    			.collect(Collectors.toList());
+    }
+    
+    private List<Reference> getPointerReferences(Address address) {
+    	List<Reference> availableReferences = new ArrayList<>();
+    	
+    	if (this.referenceManager.getReferenceCountTo(address) > 0) {
+    		ReferenceIterator refsIter = referenceManager.getReferencesTo(address);
+    		Spliterator<Reference> refsSpliter = refsIter.spliterator();
+    		List<Reference> references = StreamSupport.stream(refsSpliter, false)
+    				.collect(Collectors.toList());
+
+    		availableReferences.addAll(references);
+    	}
+    	
+    	if (this.referenceManager.getReferenceCountFrom(address) > 0) {
+    		Reference[] refsArray = referenceManager.getReferencesFrom(address);
+    		List<Reference> references = List.of(refsArray);
+
+    		availableReferences.addAll(references);
+    	}
+    	
+    	return availableReferences;
+    }
+
+    private Map<Address, List<Reference>> loadMemoryAddressReferences(List<Address> addresses) { 
+    	return addresses.stream()
+    			.collect(Collectors.toMap(addr -> addr, addr -> this.getPointerReferences(addr)))
+    			.entrySet()
+    			.stream()
+    			.filter(entry -> !entry.getValue().isEmpty())
+    			.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+    
+    private List<List<Address>> loadNeighbourPointers(Map<Address, List<Reference>> addresses) {
+    	List<Address> memoryAddresses = addresses.keySet()
+    			.stream()
+    			.sorted()
+    			.collect(Collectors.toList());
+    	
+    	List<Address> neighboursAddresses = new ArrayList<>();
+    	List<List<Address>> allNeighbours = new ArrayList<>();
+
+    	Address prevAddress = memoryAddresses.get(0);
+    	for (int i = 1; i < memoryAddresses.size(); ++i) {
+    		Address currAddress = memoryAddresses.get(i);
+    		
+    		Long prevAddressOffset = prevAddress.getOffset();
+    		Long currAddressOffset = currAddress.getOffset();
+    		if ( (currAddressOffset - prevAddressOffset) > POINTER_ADDRESS_OFFSET ) {
+    			allNeighbours.add(neighboursAddresses);
+    			neighboursAddresses = new ArrayList<>();
+    			prevAddress = currAddress;
+    			continue;
+    		}
+    		
+    		neighboursAddresses.add(prevAddress);
+    		neighboursAddresses.add(currAddress);
+    		prevAddress = currAddress;
+    	}
+    	
+    	return allNeighbours;
+    }
+    
+    private List<MemoryStructure> generateMemoryStructures(List<List<Address>> allNeighbours) {
+    	List<MemoryStructure> allStructures = new ArrayList<>();
+    	for (List<Address> neighbours : allNeighbours) {
+    		if (neighbours.isEmpty()) {
+    			continue;
+    		}
+    		
+    		Address firstAddress = neighbours.get(0);
+    		MemoryStructure memoryStructure = new MemoryStructure(firstAddress, neighbours);
+    	}
+    	
+    	return allStructures;
+    }
+    
+    private void generateMemoryStructureGraph(Map<Address, MemoryStructure> memoryStructures, Map<Address, List<Reference>> references) {
+    	Map<MemoryStructure, AttributedVertex> graphAttributes = new HashMap<>();
+    	for (Address address : memoryStructures.keySet()) {
+    		MemoryStructure memStructure = memoryStructures.get(address);
+			graphAttributes.put(memStructure, vertex(memStructure.getAddress()));
+    	}
+    	
+    	for (Address address : references.keySet()) {
+    		for (Reference reference : references.get(address)) {
+    			Address toAddress = reference.getToAddress();
+    			Address fromAddress = reference.getFromAddress();
+    			
+    			MemoryStructure toMemStructure = memoryStructures.get(toAddress);
+    			if (toMemStructure == null) {
+    				MemoryStructure memStrct = new MemoryStructure(toAddress, List.of());
+    				memoryStructures.put(toAddress, memStrct);
+    				
+    				AttributedVertex attribute = vertex(memStrct.getAddress());
+    				graphAttributes.put(memStrct, attribute);
+    			}
+    			
+    			MemoryStructure fromMemStructure = memoryStructures.get(fromAddress);
+    			if (fromMemStructure == null) {
+    				MemoryStructure memStrct = new MemoryStructure(fromAddress, List.of());
+    				memoryStructures.put(fromAddress, memStrct);
+    				
+    				AttributedVertex attribute = vertex(memStrct.getAddress());
+    				graphAttributes.put(memStrct, attribute);
+    			}
+
+    			AttributedVertex toVertex = graphAttributes.get(toAddress);
+    			AttributedVertex fromVertex = graphAttributes.get(fromAddress);
+    			
+    			edge(fromVertex, toVertex);
+    		}
+    	}
+    }
+    
+	// ------------------------------------------------------------------------------------------------------------
     
     private Map<Address, List<Reference>> findDataReferences() {
     	AddressIterator addressIterator = currentProgram.getMemory().getAddresses(true);
@@ -125,10 +259,10 @@ public class CollectionDetection extends GhidraScript {
 		}
 	}
 	
+	// ------------------------------------------------------------------------------------------------------------
     
     private Map<Address, List<Address>> findStructureReferences(Map<Address, List<Reference>> allReferences) {
     	Map<Address, List<Address>> structureReferences = new HashMap<>();
-    	
     	List<Address> strctAddrsArray = allReferences.keySet()
     			.stream()
     			.sorted()
@@ -145,6 +279,7 @@ public class CollectionDetection extends GhidraScript {
 
     		if (addrsDifference < 16) {
     			structureReferences.put(currAddress, List.of(currAddress, prevAddress));
+    			
     		}
     		
     		prevAddress = currAddress;
@@ -153,7 +288,27 @@ public class CollectionDetection extends GhidraScript {
     	return structureReferences;
     }
     
+    private Map<Address, List<Address>> findStructureReferences2(Map<Address, List<Reference>> allReferences) {
+    	Map<Address, List<Address>> structureReferences = new HashMap<>();
+    	List<Address> strctAddrsArray = allReferences.keySet()
+    			.stream()
+    			.sorted()
+    			.collect(Collectors.toList());
+    	
+    	Address prevAddress = strctAddrsArray.get(0);
+    	for (int i = 1; i < strctAddrsArray.size(); ++i) {
+    		
+    		Address currAddress = strctAddrsArray.get(i);
+    		Long prevAddressOffset = prevAddress.getOffset();
+    		Long currAddressOffset = currAddress.getOffset();
+    		
+    	}
+    	
+    	return structureReferences;
+    }
 
+	// ------------------------------------------------------------------------------------------------------------
+    
 	private void generateStructureGraph(Map<Address, List<Address>> structureReferences) {
 		this.graphNodes = structureReferences.keySet()
 				.stream()
@@ -171,47 +326,63 @@ public class CollectionDetection extends GhidraScript {
 	}
 	
 	private void generateFullGraph(Map<Address, List<Address>> structureReferences, Map<Address, List<Reference>> memoryReferences) {
-		Map<Address, Structure> allStructures = new HashMap<Address, Structure>();
-		for (Address address : structureReferences.keySet()) {
-			Structure structure = new Structure(address, structureReferences.get(address));
-			allStructures.put(address, structure);
-		}
-
-		List<StructureReference> structureReferenceList = new ArrayList<>();
-		for (Address address : memoryReferences.keySet()) {
-			for (Reference reference : memoryReferences.get(address)) {
-				Address toAddress = currRef.getToAddress();
-				Address fromAddress = currRef.getFromAddress();
-
-				Structure toStructure = allStructures.get(toAddress);
-				if (toStructure == null) {
-					toStructure = new Structure(toAddress, List.of());
-				}
-
-				Structure fromStructure = allStructures.get(fromAddress);
-				if (fromStructure == null) {
-					fromStructure = new Structure(fromAddress, List.of());
-				}
-
-				StructureReference structureReference = new StructureReference(fromStructure, toStructure);
-				structureReferenceList.add(structureReference);
-			}
-		}
-
-		Map<Structure, AttributedVertex> strctVertex = new HashMap<>();
-		for (Structure structure : allStructures.values()) {
-			AttributedVertex node = vertex(structure.getStructureAddress());
-			strctVertex.put(structure, node);
-		}
-
-		for (StructureReference structureReference : structureReferenceList) {
-			Structure toStructure = structureReference.getToStructure();
-			Structure fromStructure = structureReference.getFromStructure();
-
-			edge(strctVertex.get(fromStructure), strctVertex.get(toStructure));
-		}
+//		Map<Address, Structure> allStructures = new HashMap<Address, Structure>();
+//		for (Address address : structureReferences.keySet()) {
+//			Structure structure = new Structure(address, structureReferences.get(address));
+//			allStructures.put(address, structure);
+//		}
+//
+//		List<StructureReference> structureReferenceList = new ArrayList<>();
+//		for (Address address : memoryReferences.keySet()) {
+//			for (Reference reference : memoryReferences.get(address)) {
+//				Address toAddress = reference.getToAddress();
+//				Address fromAddress = reference.getFromAddress();
+//
+//				Structure toStructure = allStructures.get(toAddress);
+//				if (toStructure == null) {
+//					toStructure = new Structure(toAddress, List.of());
+//					allStructures.put(toAddress, toStructure);
+//				}
+//
+//				Structure fromStructure = allStructures.get(fromAddress);
+//				if (fromStructure == null) {
+//					fromStructure = new Structure(fromAddress, List.of());
+//					allStructures.put(fromAddress, fromStructure);
+//				}
+//
+//				StructureReference structureReference = new StructureReference(fromStructure, toStructure);
+//				structureReferenceList.add(structureReference);
+//			}
+//		}
+//
+//		Map<Structure, AttributedVertex> strctVertex = new HashMap<>();
+//		for (Structure structure : allStructures.values()) {
+//			AttributedVertex node = vertex(structure.getStructureAddress());
+//			strctVertex.put(structure, node);
+//		}
+//
+//		for (StructureReference structureReference : structureReferenceList) {
+//			Structure toStructure = structureReference.getToStructure();
+//			Structure fromStructure = structureReference.getFromStructure();
+//			
+//			AttributedVertex toVertex = strctVertex.get(toStructure);
+//			AttributedVertex fromVertex = strctVertex.get(fromStructure);
+//
+//			edge(fromVertex, toVertex);
+//		}
 	}
 
+	// ------------------------------------------------------------------------------------------------------------
+	
+	private void testtt(Map<Address, List<Address>> strctReferences) {
+		for (Address startAddress : strctReferences.keySet()) {
+			for (Address ptrAddress : strctReferences.get(startAddress)) {
+				
+			}
+		}
+	}
+	
+	// ------------------------------------------------------------------------------------------------------------
 	
 	private AttributedVertex vertex(Address first, Address second) {
 		String vertexLabel = String.format(
@@ -316,3 +487,49 @@ public class CollectionDetection extends GhidraScript {
 	}
 
 }
+
+
+
+class MemoryStructure {
+
+    private final Address address;
+
+    private final List<Address> pointers;
+
+    //private final List<StructureReference> references;
+
+    public MemoryStructure(Address address, List<Address> pointers) {
+        this.address = address;
+        this.pointers = pointers;
+    }
+
+    //public void appendReference(StructureReference reference) {
+    //    this.references.add(reference);
+    //}
+
+    public Address getAddress() {
+        return this.address;
+    }
+
+}
+//
+//class StructureReference {
+//
+//    private final Structure toStructureRef;
+//
+//    private final Structure fromStructureRef;
+//
+//    public StructureReference(Structure fromAddr, Structure toAddr) {
+//        this.fromStructureRef = fromAddr;
+//        this.toStructureRef = toAddr;
+//    }
+//
+//    public Structure getToStructure() {
+//        return this.toStructureRef;
+//    }
+//
+//    public Structure getFromStructure() {
+//        return this.fromStructureRef;
+//    }
+//
+//}
