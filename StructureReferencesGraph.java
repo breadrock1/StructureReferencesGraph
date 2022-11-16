@@ -1,19 +1,21 @@
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import ghidra.app.script.GhidraScript;
 import ghidra.app.services.GraphDisplayBroker;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.address.AddressIterator;
+import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
@@ -29,11 +31,10 @@ public class CollectionDetection extends GhidraScript {
 
     private Program program;
     private PluginTool pluginTool;
+    private AddressFactory addressFactory;
     private ReferenceManager referenceManager;
 
     private AttributedGraph graph;
-
-    private final static Integer POINTER_ADDRESS_OFFSET = 16;
 
 
     @Override
@@ -41,12 +42,13 @@ public class CollectionDetection extends GhidraScript {
     public void run() throws Exception {
         this.program = currentProgram;
         this.pluginTool = getState().getTool();
+        this.addressFactory = this.program.getAddressFactory();
         this.referenceManager = this.program.getReferenceManager();
 
         List<Address> memoryAddresses = loadNonNullMemoryAddresses();
         Map<Address, List<Reference>> addressReferences = loadAddressReferences(memoryAddresses);
-        List<Set<Address>> neigbouringAddresses = loadNeighbouringAddresses(addressReferences);
-        List<MemoryStructure> memoryStructures = buildMemoryStructures(neigbouringAddresses);
+        Map<Address, Long> addressesTableSize = generateAddressesTableSize(addressReferences);
+        Map<Address, MemoryStructure> memoryStructures = generateAddressesTableMap(addressesTableSize);
 
         GraphDisplayBroker service = this.pluginTool.getService(GraphDisplayBroker.class);
         GraphDisplay display = service.getDefaultGraphDisplay(false, this.monitor);
@@ -60,6 +62,17 @@ public class CollectionDetection extends GhidraScript {
         return StreamSupport.stream(addressIterator.spliterator(), false)
                 .sorted()
                 .collect(Collectors.toList());
+    }
+
+    private Map<Address, List<Reference>> loadAddressReferences(List<Address> addresses) {
+        Map<Address, List<Reference>> addressReferencess = addresses.stream()
+                .collect(Collectors.toMap(addr -> addr, addr -> this.getPointerReferences(addr)))
+                .entrySet()
+                .stream()
+                .filter(entry -> !entry.getValue().isEmpty())
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        return addressReferencess;
     }
 
     private List<Reference> getPointerReferences(Address address) {
@@ -84,114 +97,90 @@ public class CollectionDetection extends GhidraScript {
         return availableReferences;
     }
 
-    private Map<Address, List<Reference>> loadAddressReferences(List<Address> addresses) {
-        return addresses.stream()
-                .collect(Collectors.toMap(addr -> addr, addr -> this.getPointerReferences(addr)))
-                .entrySet()
+    private Map<Address, Long> generateAddressesTableSize(Map<Address, List<Reference>> addresses) {
+        List<Address> toAddrsList = addresses.values()
                 .stream()
-                .filter(entry -> !entry.getValue().isEmpty())
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-    }
-
-    private List<Set<Address>> loadNeighbouringAddresses(Map<Address, List<Reference>> addresses) {
-        List<Address> memoryAddresses = addresses.keySet()
-                .stream()
+                .flatMap(List::stream)
+                .map(Reference::getToAddress)
                 .sorted()
                 .collect(Collectors.toList());
 
-        Set<Address> neighboursAddresses = new HashSet<>();
-        List<Set<Address>> allNeighbours = new ArrayList<>();
+        Address prevAddr = toAddrsList.get(0);
+        Map<Address, Long> tablesFrameSize = new HashMap<>();
+        for (int i = 1; i < toAddrsList.size(); ++i) {
+            Address currAddr = toAddrsList.get(i);
+            Long addrsOffset = currAddr.getOffset() - prevAddr.getOffset() - 1;
+            tablesFrameSize.put(prevAddr, (addrsOffset <= 128) ? addrsOffset : 128);
 
-        Address prevAddress = memoryAddresses.get(0);
-        for (int i = 1; i < memoryAddresses.size(); ++i) {
-            Address currAddress = memoryAddresses.get(i);
-            Long prevAddressOffset = prevAddress.getOffset();
-            Long currAddressOffset = currAddress.getOffset();
-
-            if ((currAddressOffset - prevAddressOffset) <= POINTER_ADDRESS_OFFSET) {
-                neighboursAddresses.add(currAddress);
-                neighboursAddresses.add(prevAddress);
-
-            } else {
-                neighboursAddresses.add(prevAddress);
-                allNeighbours.add(neighboursAddresses);
-                neighboursAddresses = new HashSet<>();
-            }
-
-            prevAddress = currAddress;
+            prevAddr = currAddr;
         }
 
-        return allNeighbours;
+        tablesFrameSize.put(prevAddr, 128L);
+
+        return tablesFrameSize;
     }
 
-    private List<MemoryStructure> buildMemoryStructures(List<Set<Address>> allNeighbours) {
-        List<MemoryStructure> memoryStructures = allNeighbours.stream()
-                .map(Set::stream)
-                .map(Stream::toList)
-                .filter(list -> !list.isEmpty())
-                .map(suit -> new MemoryStructure(suit.get(0), suit))
-                .collect(Collectors.toList());
+    private Map<Address, MemoryStructure> generateAddressesTableMap(Map<Address, Long> tablesFrameSize) {
+        Map<Address, MemoryStructure> memStrctMap = new HashMap<>();
+        for (Map.Entry<Address, Long> tableSizeEntry : tablesFrameSize.entrySet()) {
+            Address startAddr = tableSizeEntry.getKey();
+            Long endAddrOffset = startAddr.getOffset() + tableSizeEntry.getValue();
 
-        return memoryStructures;
+            AddressSpace currSpace = startAddr.getAddressSpace();
+            Address endAddr = this.addressFactory.getAddress(currSpace.getSpaceID(), endAddrOffset);
+            AddressSet tableSetAddrs = this.addressFactory.getAddressSet(startAddr, endAddr);
+
+            memStrctMap.put(startAddr, new MemoryStructure(startAddr, tableSetAddrs));
+        }
+
+        return memStrctMap;
     }
 
-    private void generateMemoryStructureGraph(List<MemoryStructure> memoryStructures, Map<Address, List<Reference>> references) {
-        Map<MemoryStructure, AttributedVertex> graphAttributes = memoryStructures.stream()
-                .collect(Collectors.toMap(strct -> strct, strct -> vertex(strct.getAddress(), strct.getLastAddress())));
 
+    private void generateMemoryStructureGraph(Map<Address, MemoryStructure> memoryStructures, Map<Address, List<Reference>> references) {
         Set<Reference> referenceValues = references.values()
                 .stream()
                 .flatMap(List::stream)
                 .collect(Collectors.toSet());
 
+        Map<MemoryStructure, AttributedVertex> graphAttributes = memoryStructures.values()
+                .stream()
+                .collect(Collectors.toMap(strct -> strct, strct -> vertex(strct)));
+
         for (Reference currReference : referenceValues) {
             Address toAddress = currReference.getToAddress();
             Address fromAddress = currReference.getFromAddress();
 
-            Optional<MemoryStructure> optToMemStructure = graphAttributes.keySet()
+            MemoryStructure toMemStrct = memoryStructures.get(toAddress);
+            AttributedVertex toMemStrctVertex = graphAttributes.get(toMemStrct);
+
+            Optional<MemoryStructure> optFromMemStrct = memoryStructures.values()
                     .stream()
-                    .filter(strct -> strct.isAddressContains(toAddress))
+                    .filter(strct -> strct.contains(fromAddress))
                     .findFirst();
 
-            Optional<MemoryStructure> optFromMemStructure = graphAttributes.keySet()
-                    .stream()
-                    .filter(strct -> strct.isAddressContains(fromAddress))
-                    .findFirst();
+            AttributedVertex fromMemStrctVertex = (optFromMemStrct.isPresent())
+                    ? graphAttributes.get(optFromMemStrct.get()) : vertex(fromAddress);
 
-            AttributedVertex toMemVertex;
-            MemoryStructure toMemStructure;
-            if (!optToMemStructure.isPresent()) {
-                toMemStructure = new MemoryStructure(toAddress, List.of(toAddress));
-                toMemVertex = vertex(toMemStructure.getAddress(), toMemStructure.getLastAddress());
-                graphAttributes.put(toMemStructure, toMemVertex);
-            } else {
-                toMemStructure = optToMemStructure.get();
-                toMemVertex = graphAttributes.get(toMemStructure);
-            }
-
-            AttributedVertex fromMemVertex;
-            MemoryStructure fromMemStructure;
-            if (!optFromMemStructure.isPresent()) {
-                fromMemStructure = new MemoryStructure(fromAddress, List.of(fromAddress));
-                fromMemVertex = vertex(fromMemStructure.getAddress(), fromMemStructure.getLastAddress());
-                graphAttributes.put(fromMemStructure, fromMemVertex);
-            } else {
-                fromMemStructure = optFromMemStructure.get();
-                fromMemVertex = graphAttributes.get(fromMemStructure);
-            }
-
-            edge(fromMemVertex, toMemVertex);
+            edge(fromMemStrctVertex, toMemStrctVertex);
         }
     }
 
-    private AttributedVertex vertex(Address first, Address second) {
+    private AttributedVertex vertex(Address address) {
+        String vertexLabel = String.format("0x%s", Long.toHexString(address.getOffset()));
+        return graph.addVertex(vertexLabel, vertexLabel);
+    }
+
+    private AttributedVertex vertex(MemoryStructure memStructure) {
         String vertexLabel = String.format(
-                "0x%s -> 0x%s",
-                Long.toHexString(first.getOffset()),
-                Long.toHexString(second.getOffset())
+                "0x%s -> 0x%s\nAddress count: %s",
+                Long.toHexString(memStructure.getStartAddress().getOffset()),
+                Long.toHexString(memStructure.getLastAddress().getOffset()),
+                memStructure.getAddressSetSize()
         );
 
         return graph.addVertex(vertexLabel, vertexLabel);
+
     }
 
     private AttributedEdge edge(AttributedVertex v1, AttributedVertex v2) {
@@ -205,29 +194,34 @@ class MemoryStructure {
 
     private final Address startAddress;
 
-    private final List<Address> pointers;
+    private final AddressSet addressSet;
 
-    public MemoryStructure(Address address, List<Address> pointers) {
+    private final long addressSetSize;
+
+    public MemoryStructure(Address address, AddressSet addressSet) {
         this.startAddress = address;
-        this.pointers = pointers;
+        this.addressSet = addressSet;
+        this.addressSetSize = addressSet.getNumAddresses();
     }
 
-    public Address getAddress() {
+    public Address getStartAddress() {
         return this.startAddress;
     }
 
+    public AddressSet getAddressSet() {
+        return this.addressSet;
+    }
+
+    public long getAddressSetSize() {
+        return this.addressSetSize;
+    }
+
     public Address getLastAddress() {
-        int poitersCount = this.pointers.size();
-        return this.pointers.get(poitersCount - 1);
+        return this.addressSet.getMaxAddress();
     }
 
-    public List<Address> getPointers() {
-        return this.pointers;
-    }
-
-    public boolean isAddressContains(Address address) {
-        return this.pointers.contains(address);
+    public boolean contains(Address address) {
+        return this.addressSet.contains(address);
     }
 
 }
-
