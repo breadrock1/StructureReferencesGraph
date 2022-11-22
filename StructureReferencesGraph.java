@@ -1,5 +1,6 @@
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,7 +39,7 @@ import ghidra.service.graph.GraphDisplay;
 import ghidra.service.graph.GraphType;
 
 
-public class CollectionDetection extends GhidraScript {
+public class StructureReferencesGraph extends GhidraScript {
 
     private Program program;
     private PluginTool pluginTool;
@@ -62,22 +63,39 @@ public class CollectionDetection extends GhidraScript {
         Map<Address, Long> addressesTableSize = generateAddressesTableSize(addressReferences);
         Map<Address, MemoryStructure> memoryStructures = generateAddressesTableMap(addressesTableSize);
 
+        // ------------------------------------------------------------------------------------------------
+        
+        // Generating major memory graph based on pointers and references. 
         this.memoryGraph = new AttributedGraph("Memory Graph", new EmptyGraphType());
         generateMemoryStructureGraph(memoryStructures, addressReferences);
 
         GraphDisplayBroker mgGraphService = this.pluginTool.getService(GraphDisplayBroker.class);
         GraphDisplay mgGraphDisplay = mgGraphService.getDefaultGraphDisplay(false, this.monitor);
         mgGraphDisplay.setGraph(this.memoryGraph, "Memory Graph", false, this.monitor);
+        
+        // ------------------------------------------------------------------------------------------------
 
-        // There is code block with filtered child nodes.
+        // Generating only cyclic graph -> is there are any double linked containers?
         this.filteredGraph = new AttributedGraph("Filtered Graph", new EmptyGraphType());
-        CustomAttributedGraph taintedGraph = transformGraphToTaintedGraph(this.memoryGraph);
-        boolean isAcyclicGraph = isGeneratedGraphAcyclic(taintedGraph);
-        findRootGraphNodes(taintedGraph);
-
+        cloneMemoryGraphObject(this.memoryGraph);
+        generateCyclicGraph();
+        
         GraphDisplayBroker service = this.pluginTool.getService(GraphDisplayBroker.class);
         GraphDisplay display = service.getDefaultGraphDisplay(false, this.monitor);
         display.setGraph(this.filteredGraph, "Filtered Graph", false, this.monitor);
+        
+        // ------------------------------------------------------------------------------------------------
+        
+        // Need realized dividing graph to several separated -> for each getting type.
+        // There is implementation of custom graph -> to check visited nodes! 
+        CustomAttributedGraph taintedGraph = transformGraphToTaintedGraph(this.filteredGraph);
+        boolean isAcyclicGraph = isGeneratedGraphAcyclic(taintedGraph);
+        
+        if ( !isAcyclicGraph ) {
+        	System.out.println("There is non double linked list!");
+        } else {
+        	System.out.println("There is double linked list!");
+        }
     }
 
     private List<Address> loadNonNullMemoryAddresses() {
@@ -211,8 +229,68 @@ public class CollectionDetection extends GhidraScript {
     }
 
 
+    private void cloneMemoryGraphObject(AttributedGraph clonedGraph) {
+    	clonedGraph.vertexSet().forEach(this.filteredGraph::addVertex);
+    	for (AttributedEdge graphEdge : clonedGraph.edgeSet()) {
+    		AttributedVertex srcGraphNode = clonedGraph.getEdgeSource(graphEdge);
+    		AttributedVertex dstGraphNode = clonedGraph.getEdgeTarget(graphEdge);
+    		this.filteredGraph.addEdge(srcGraphNode, dstGraphNode);
+    	}
+    }
+    
+    private void generateCyclicGraph() {
+        Set<AttributedEdge> nonBackwardGraphEdges = new HashSet<>();
+        Set<AttributedVertex> usefulGraphEdges = new HashSet<>();
+        
+        for (AttributedVertex parentGraphNode : this.filteredGraph.vertexSet()) {
+        
+        	Set<AttributedEdge> parentGraphNodeEdges = this.filteredGraph.edgesOf(parentGraphNode);
+        	Set<AttributedVertex> childrenGraphNodes = parentGraphNodeEdges.stream()
+        			.map(this.filteredGraph::getEdgeTarget)
+        			.collect(Collectors.toSet());
+        	
+        	if (parentGraphNodeEdges.size() < 2) {
+        		nonBackwardGraphEdges.addAll(parentGraphNodeEdges);
+        		usefulGraphEdges.addAll(childrenGraphNodes);
+        		continue;
+        	}
+
+        	for (AttributedVertex childGraphNode : childrenGraphNodes) {
+        		AttributedEdge backwardGraphNodeEdge = this.filteredGraph.getEdge(childGraphNode, parentGraphNode);
+        		Optional<AttributedEdge> optBackwardGraphNodeEdge = Optional.ofNullable(backwardGraphNodeEdge);
+        		
+        		if (optBackwardGraphNodeEdge.isPresent()) {
+        			continue;
+        		}
+        		
+        		AttributedEdge forwardGraphNodeEdge = this.filteredGraph.getEdge(parentGraphNode, childGraphNode);
+    			nonBackwardGraphEdges.add(forwardGraphNodeEdge);
+    			usefulGraphEdges.add(childGraphNode);
+        	}
+        }
+        
+        this.filteredGraph.removeAllEdges(nonBackwardGraphEdges);
+        //this.filteredGraph.removeAllVertices(usefulGraphEdges);
+    }
+    
+    
+    private AttributedGraph findSeparatedAttributedGraphs(AttributedGraph memGraph) {
+    	//Graph<String, DefaultEdge> g = new SimpleDirectedGraph<>(DefaultEdge.class);
+        //ConnectivityInspector ci = new ConnectivityInspector(g);
+        //// Test whether the graph is connected:
+        //ci.isConnected();
+        
+        return memGraph;
+    }
+    
+    private AttributedGraph divideMemoryGraphBySubGraph(AttributedGraph memGraph, AttributedGraph subGraph) {
+    	return memGraph;
+    }
+    
+
     private CustomAttributedGraph transformGraphToTaintedGraph(AttributedGraph memGraph) {
-        CustomAttributedGraph customGraph = new CustomAttributedGraph("Tainted Graph", new EmptyGraphType());
+        CustomAttributedGraph customGraph = new CustomAttributedGraph("Cyclic Graph", new EmptyGraphType());
+        
         memGraph.vertexSet().forEach(customGraph::addVertex);
         memGraph.edgeSet().forEach(nodeEdge -> {
             AttributedVertex srcVertex = memGraph.getEdgeSource(nodeEdge);
@@ -282,45 +360,6 @@ public class CollectionDetection extends GhidraScript {
 //            }
 //        }
 //    }
-
-
-    private void findDoubleLinkedContainerRootNodes() {
-
-    }
-
-    private void generateAcyclicGraph() {
-
-    }
-
-    private void findRootGraphNodes(CustomAttributedGraph customGraph) {
-        List<AttributedVertex> nonRootGraphNodes = new ArrayList<>();
-        for (AttributedVertex graphNode : this.memoryGraph.vertexSet()) {
-            Set<AttributedEdge> outGraphEdges = this.memoryGraph.outgoingEdgesOf(graphNode);
-            if (outGraphEdges.isEmpty()) {
-                nonRootGraphNodes.add(graphNode);
-            }
-        }
-
-        for (AttributedVertex graphNode : this.memoryGraph.vertexSet()) {
-            if (nonRootGraphNodes.contains(graphNode)) {
-                continue;
-            }
-
-            this.filteredGraph.addVertex(graphNode);
-            for (AttributedEdge graphNodeEdge : this.memoryGraph.outgoingEdgesOf(graphNode)) {
-                AttributedVertex srcVertex = this.memoryGraph.getEdgeSource(graphNodeEdge);
-                AttributedVertex dstVertex = this.memoryGraph.getEdgeTarget(graphNodeEdge);
-
-                if (nonRootGraphNodes.contains(srcVertex) || nonRootGraphNodes.contains(dstVertex)) {
-                    continue;
-                }
-
-                this.filteredGraph.addEdge(srcVertex, dstVertex);
-            }
-        }
-
-
-    }
 
 }
 
