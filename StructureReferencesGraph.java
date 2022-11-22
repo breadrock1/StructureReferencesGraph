@@ -86,12 +86,16 @@ public class StructureReferencesGraph extends GhidraScript {
         
         // ------------------------------------------------------------------------------------------------
         
+        // Need realized dividing graph to several separated -> for each getting type.
         // There is implementation of custom graph -> to check visited nodes! 
-        CustomAttributedGraph taintedGraph = transformGraphToTaintedGraph(this.memoryGraph);
+        CustomAttributedGraph taintedGraph = transformGraphToTaintedGraph(this.filteredGraph);
         boolean isAcyclicGraph = isGeneratedGraphAcyclic(taintedGraph);
-
-        // TODO: Need to realize algorithm to find root nodes for each graph.
-        findRootGraphNodes(taintedGraph);
+        
+        if ( !isAcyclicGraph ) {
+        	System.out.println("There is non double linked list!");
+        } else {
+        	System.out.println("There is double linked list!");
+        }
     }
 
     private List<Address> loadNonNullMemoryAddresses() {
@@ -356,45 +360,6 @@ public class StructureReferencesGraph extends GhidraScript {
 //            }
 //        }
 //    }
-
-
-    private void findDoubleLinkedContainerRootNodes() {
-
-    }
-
-    private void generateAcyclicGraph() {
-
-    }
-
-    private void findRootGraphNodes(CustomAttributedGraph customGraph) {
-        List<AttributedVertex> nonRootGraphNodes = new ArrayList<>();
-        for (AttributedVertex graphNode : this.memoryGraph.vertexSet()) {
-            Set<AttributedEdge> outGraphEdges = this.memoryGraph.outgoingEdgesOf(graphNode);
-            if (outGraphEdges.isEmpty()) {
-                nonRootGraphNodes.add(graphNode);
-            }
-        }
-
-        for (AttributedVertex graphNode : this.memoryGraph.vertexSet()) {
-            if (nonRootGraphNodes.contains(graphNode)) {
-                continue;
-            }
-
-            this.filteredGraph.addVertex(graphNode);
-            for (AttributedEdge graphNodeEdge : this.memoryGraph.outgoingEdgesOf(graphNode)) {
-                AttributedVertex srcVertex = this.memoryGraph.getEdgeSource(graphNodeEdge);
-                AttributedVertex dstVertex = this.memoryGraph.getEdgeTarget(graphNodeEdge);
-
-                if (nonRootGraphNodes.contains(srcVertex) || nonRootGraphNodes.contains(dstVertex)) {
-                    continue;
-                }
-
-                this.filteredGraph.addEdge(srcVertex, dstVertex);
-            }
-        }
-
-
-    }
 
 }
 
@@ -727,4 +692,3 @@ class MemoryStructure {
     }
 
 }
-
